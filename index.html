@@ -195,6 +195,21 @@
             box-shadow: 0 0 0 3px rgba(79, 172, 254, 0.1);
         }
 
+        .form-group select {
+            width: 100%;
+            padding: 12px 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 1rem;
+            transition: all 0.3s ease;
+        }
+
+        .form-group select:focus {
+            outline: none;
+            border-color: #4facfe;
+            box-shadow: 0 0 0 3px rgba(79, 172, 254, 0.1);
+        }
+
         .submit-btn {
             width: 100%;
             padding: 15px;
@@ -318,7 +333,17 @@
 
                     <div class="form-group">
                         <label for="societyName">Society Name:</label>
-                        <input type="text" id="societyName" placeholder="Enter society name" required>
+                        <select id="societyName" required>
+                            <option value="CS">CS</option>
+                            <option value="EMBS">EMBS</option>
+                            <option value="IAS">IAS</option>
+                            <option value="PELS">PELS</option>
+                            <option value="PES">PES</option>
+                            <option value="RAS">RAS</option>
+                            <option value="SB" selected>SB</option>
+                            <option value="SPS">SPS</option>
+                            <option value="WIE">WIE</option>
+                        </select>
                     </div>
 
                     <button type="submit" class="submit-btn" id="submitBtn">

@@ -351,6 +351,11 @@
                         </select>
                     </div>
 
+                    <div class="form-group">
+                        <label for="password">Password:</label>
+                        <input type="password" id="password" placeholder="Enter password" required>
+                    </div>
+
                     <button type="submit" class="submit-btn" id="submitBtn">
                         🚀 Book Event
                     </button>
@@ -366,6 +371,14 @@
         let currentDate = new Date();
         let selectedDate = null;
         let bookedDates = new Set();
+        let requestHistory = [];
+
+        const SecurityConfig = {
+            maxRetries: 3,
+            requestTimeout: 10000, // 10 seconds
+            rateLimitWindow: 60000, // 1 minute
+            maxRequestsPerWindow: 10
+        };
 
         // Initialize the calendar
         document.addEventListener('DOMContentLoaded', function () {
@@ -523,24 +536,201 @@
             document.getElementById('message').innerHTML = '';
         }
 
-        async function loadBookedDates() {
-            try {
-                const response = await fetch(`${GOOGLE_SCRIPT_URL}?action=getBookedDates`);
-                const data = await response.json();
+        function checkClientRateLimit() {
+            const now = Date.now();
 
-                if (data.success) {
-                    bookedDates = new Set(data.dates);
-                    renderCalendar();
+            // Clean old requests
+            requestHistory = requestHistory.filter(
+                timestamp => (now - timestamp) < SecurityConfig.rateLimitWindow
+            );
+
+            // Check if limit exceeded
+            if (requestHistory.length >= SecurityConfig.maxRequestsPerWindow) {
+                return false;
+            }
+
+            // Add current request
+            requestHistory.push(now);
+            return true;
+        }
+
+        function validateInputs(eventName, societyName, date) {
+            // Check for empty fields
+            if (!eventName || !societyName) {
+                showMessage('Please fill in all fields!', 'error');
+                return false;
+            }
+
+            // Length validation
+            if (eventName.length > 100) {
+                showMessage('Event name is too long (max 100 characters)!', 'error');
+                return false;
+            }
+
+            if (societyName.length > 100) {
+                showMessage('Society name is too long (max 100 characters)!', 'error');
+                return false;
+            }
+
+            // Check for potentially harmful characters
+            const dangerousChars = /[<>\"'&]/;
+            if (dangerousChars.test(eventName) || dangerousChars.test(societyName)) {
+                showMessage('Invalid characters detected in input fields!', 'error');
+                return false;
+            }
+
+            // Date validation
+            const selectedDateObj = new Date(date);
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+
+            if (selectedDateObj < today) {
+                showMessage('Cannot book dates in the past!', 'error');
+                return false;
+            }
+
+            // Check if date is too far in the future (optional - adjust as needed)
+            const maxFutureDate = new Date();
+            maxFutureDate.setFullYear(maxFutureDate.getFullYear() + 1);
+
+            if (selectedDateObj > maxFutureDate) {
+                showMessage('Cannot book dates more than 1 year in advance!', 'error');
+                return false;
+            }
+
+            return true;
+        }
+
+        function sanitizeInput(input) {
+            if (typeof input !== 'string') return '';
+
+            // Remove potentially harmful characters and trim
+            return input.replace(/[<>\"'&]/g, '').trim();
+        }
+
+        function sleep(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        async function submitBookingWithRetry(bookingData, retryCount = 0) {
+            try {
+                const timestamp = Math.floor(Date.now() / 1000);
+
+                // Prepare data - NO SECRET KEY ON CLIENT SIDE
+                const data = {
+                    action: 'bookEvent',
+                    date: bookingData.date,
+                    eventName: sanitizeInput(bookingData.eventName),
+                    societyName: sanitizeInput(bookingData.societyName),
+                    secret: sanitizeInput(bookingData.password),
+                    timestamp: timestamp,
+                    referer: window.location.origin,
+                    userAgent: navigator.userAgent,
+                    clientId: 'web_client_' + Math.random().toString(36).substr(2, 9)
+                };
+
+                // Create request with timeout
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), SecurityConfig.requestTimeout);
+
+                const response = await fetch(GOOGLE_SCRIPT_URL, {
+                    method: 'POST',
+                    body: JSON.stringify(data),
+                    signal: controller.signal
+                });
+
+                clearTimeout(timeoutId);
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
                 }
+
+                const result = await response.json();
+
+                if (result.success) {
+                    return true;
+                } else {
+                    // Handle specific error cases
+                    if (result.message === 'Date already booked!' ||
+                        result.message === 'Too many requests. Please try again later.') {
+                        showMessage(result.message, 'error');
+                        return false;
+                    }
+
+                    // For other errors, potentially retry
+                    throw new Error(result.message || 'Unknown error occurred');
+                }
+
             } catch (error) {
-                console.error('Error loading booked dates:', error);
-                showMessage('Error loading booked dates. Please try again.', 'error');
+                console.error(`Booking attempt ${retryCount + 1} failed:`, error);
+
+                // Handle specific error types
+                if (error.name === 'AbortError') {
+                    showMessage('Request timed out. Please try again.', 'error');
+                    return false;
+                }
+
+                // Retry logic for transient errors
+                if (retryCount < SecurityConfig.maxRetries &&
+                    (error.message.includes('network') ||
+                        error.message.includes('fetch') ||
+                        error.message.includes('Server error'))) {
+
+                    console.log(`Retrying... (${retryCount + 1}/${SecurityConfig.maxRetries})`);
+                    await sleep(1000 * (retryCount + 1)); // Exponential backoff
+                    return submitBookingWithRetry(bookingData, retryCount + 1);
+                }
+
+                showMessage(error.message || 'Error booking event. Please try again.', 'error');
+                return false;
             }
         }
 
-        // Form submission
+        async function loadBookedDates() {
+            try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), SecurityConfig.requestTimeout);
+
+                const response = await fetch(`${GOOGLE_SCRIPT_URL}?action=getBookedDates`, {
+                    method: 'GET',
+                    signal: controller.signal
+                });
+
+                clearTimeout(timeoutId);
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const result = await response.json();
+
+                if (result.success && Array.isArray(result.dates)) {
+                    bookedDates = new Set(result.dates);
+                    renderCalendar();
+                } else {
+                    console.error('Failed to load booked dates:', result.message);
+                    showMessage('Failed to load existing bookings. Please refresh the page.', 'warning');
+                }
+
+            } catch (error) {
+                console.error('Error loading booked dates:', error);
+                if (error.name === 'AbortError') {
+                    showMessage('Loading timed out. Please refresh the page.', 'warning');
+                } else {
+                    showMessage('Failed to load existing bookings. Please refresh the page.', 'warning');
+                }
+            }
+        }
+
+        // Enhanced form submission
         document.getElementById('eventForm').addEventListener('submit', async function (e) {
             e.preventDefault();
+
+            // Client-side rate limiting
+            if (!checkClientRateLimit()) {
+                showMessage('Too many requests. Please wait before trying again.', 'error');
+                return;
+            }
 
             if (!selectedDate) {
                 showMessage('Please select a date first!', 'error');
@@ -555,8 +745,8 @@
             const eventName = document.getElementById('eventName').value.trim();
             const societyName = document.getElementById('societyName').value.trim();
 
-            if (!eventName || !societyName) {
-                showMessage('Please fill in all fields!', 'error');
+            // Enhanced input validation
+            if (!validateInputs(eventName, societyName, selectedDate)) {
                 return;
             }
 
@@ -567,28 +757,20 @@
             submitBtn.disabled = true;
 
             try {
-                const response = await fetch(GOOGLE_SCRIPT_URL, {
-                    method: 'POST',
-                    body: JSON.stringify({
-                        action: 'bookEvent',
-                        timestamp: new Date().toISOString(),
-                        date: selectedDate,
-                        eventName: eventName,
-                        societyName: societyName
-                    })
+                const success = await submitBookingWithRetry({
+                    date: selectedDate,
+                    eventName: eventName,
+                    societyName: societyName,
+                    password: document.getElementById('password').value.trim()
                 });
 
-                const data = await response.json();
-
-                if (data.success) {
+                if (success) {
                     bookedDates.add(selectedDate);
                     showMessage('Event booked successfully!', 'success');
                     document.getElementById('eventForm').reset();
                     document.getElementById('selectedDate').value = '';
                     selectedDate = null;
                     renderCalendar();
-                } else {
-                    showMessage(data.message || 'Error booking event. Please try again.', 'error');
                 }
 
             } catch (error) {
@@ -598,6 +780,12 @@
                 submitBtn.innerHTML = originalText;
                 submitBtn.disabled = false;
             }
+        });
+
+        // Add CSP violation reporting (if you implement CSP headers)
+        document.addEventListener('securitypolicyviolation', function (e) {
+            console.error('CSP violation:', e);
+            // You could send this to your logging service
         });
     </script>
 </body>
